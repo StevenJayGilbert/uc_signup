@@ -9,9 +9,9 @@ dependencies[] = ca
 dependencies[] = date
 dependencies[] = profile
 
-; Information added by drupal.org packaging script on 2011-03-29
-version = "6.x-1.x-dev"
+; Information added by drupal.org packaging script on 2011-08-12
+version = "6.x-1.0-rc3"
 core = "6.x"
 project = "uc_signup"
-datestamp = "1301358507"
+datestamp = "1313123857"
 
