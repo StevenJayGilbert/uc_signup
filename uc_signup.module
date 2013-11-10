@@ -645,10 +645,11 @@ function uc_signup_form_alter(&$form, &$form_state, $form_id) {
           _uc_signup_node_available($node, 0 , $message);
           if ($message) {
             drupal_add_css(drupal_get_path('module', 'uc_signup') .'/uc_signup.css');
-            $form['submit']['#suffix'] = '<span class="uc_signup_closed_message">' . $message . '</span>'; 
+            //$form['submit']['#suffix'] = '<span class="uc_signup_closed_message">' . $message . '</span>'; 
             // Setting #disabled is sufficient here because even with DOM
             // manipulation, uc_signup_product_add_to_cart_form_validate()
             // enforces _uc_signup_node_available(). 
+            $form['submit']['#value'] = $message;
             $form['submit']['#disabled'] = TRUE;
             $form['qty']['#disabled'] = TRUE;
           }
@@ -688,6 +689,8 @@ function uc_signup_form_alter(&$form, &$form_state, $form_id) {
     $order = uc_order_load($order_id);
     if ($order->payment_method == 'paypal_wps') {
       uc_signup_order_prepare($order);
+      //TODO If this is ever used we will need to resave the order because the
+      // session data was added to it.
     }
   }
 }
@@ -754,7 +757,8 @@ function uc_signup_cart_view_form_validate($form, $form_state) {
   if (!empty($form_state['values']['items'])) {
     foreach ($form_state['values']['items'] as $key => $item) {
       $data = unserialize($item['data']);
-      if (!($form_state['values']['items'][$key]['remove'] == 1 || $form_state['values']['items'][$key]['qty'] == 0) && isset($data['uc_signup_enabled']) && $data['uc_signup_enabled'] == 1) {
+      //only validate if the user is trying to increase event quantity or continue checkout
+      if (!($form_state['clicked_button']['#value'] == 'Remove' ||$form_state['values']['items'][$key]['remove'] == 1 || $form_state['values']['items'][$key]['qty'] == 0) && isset($data['uc_signup_enabled']) && $data['uc_signup_enabled'] == 1) {
         $node = node_load($item['nid']);
         _uc_signup_node_available($node, $item['qty'], $message);
         if ($message) {
@@ -1017,39 +1021,13 @@ function uc_signup_order_prepare(&$order) {
       }
       foreach ($attendees as $key => $mail) {
         $account = user_load(array('mail' => $mail));
-        // We must provide a default password
-        // or the form will fail to validate.
-        $random_password = user_password(8);
-        if (empty($account->uid)) {
-          $form_state['values']['mail'] = $mail;
-          $form_state['values']['name'] = uc_store_email_to_username($mail);
-          $form_state['values']['op'] = t('Create new account');
-          $form_state['values']['pass'] = $random_password;
-          $form_state['values']['notify'] = (bool)variable_get('uc_signup_account_notify', 1);
-          $form_state['values']['status'] = 1;
-          $profile_form =  uc_signup_profile_form();
-          uc_signup_normalize_values($form_state, $mail, $profile_form);
-          // We masquerade as user 1 in case there is captcha or other protection on the user_register form that could cause submission to fail.
-          global $user;
-          $temp_user = $user;
-          // Always set this to false in case the operation fails.
-          session_save_session(FALSE);
-          $user = user_load(1);
-          // We use drupal_execute to enforce form validation on required
-          // fields. See http://drupal.org/node/547242 for an example of
-          // why this is necessary.
-          drupal_execute('uc_signup_profile_form', $form_state);
-          $user = $temp_user;
-          session_save_session(TRUE);
-          $account = $form_state['user'];
-          if (!$account->uid) {
-            uc_signup_cancel_temporary_signups($order);
-            return array(array('pass' => FALSE, 'message' => t('There was an error saving attendee contact information. Please verify that you have entered all required fields at the '. l('Attendee profile contact information form', 'uc_signup/attendees/profiles'))));
-          }
-        }
+        //we no longer create user accounts here because users should
+        // only have an account created after payment
+        
         // An existing user is saving account information with the 
         // 'uc_signup_auth_fields' setting enabled.
-        elseif (variable_get('uc_signup_auth_fields', 0)) {
+        /*
+        if ($account->uid != 0 && $account->variable_get('uc_signup_auth_fields', 0)) {
           $form_state = array();
           $profile_form = uc_signup_profile_form((array)$account);
           uc_signup_normalize_values($form_state, $mail, $profile_form);
@@ -1058,13 +1036,13 @@ function uc_signup_order_prepare(&$order) {
             // TODO: Add some visible confirmation to the user that
             // that the information was saved?
           }
-        }
-        $to_signup[$nid][] = $account->uid;
+        }*/
+        $to_signup[$nid][] = array('uid' => $account->uid, 'mail' => $mail);
       }
     }
     unset($nid);
     if (!empty($to_signup)) {
-      foreach ($to_signup as $nid => $uids) {
+      foreach ($to_signup as $nid => $accounts) {
         // Perform the final verification that the node is available for signups in the desired quantity.
         // Note that we do not pass the quantity in order to avoid our own placeholder signups from counting against the number of available spots.
         $node = node_load($nid);
@@ -1073,10 +1051,16 @@ function uc_signup_order_prepare(&$order) {
           uc_signup_cancel_temporary_signups($order);
           return array(array('pass' => FALSE, 'message' => t($message)));
         }
-        foreach ($uids as $key => $uid) {
-          uc_signup_create_placeholder_signup($nid, $uid, $order->order_id);
+        foreach ($accounts as $key => $account) {
+          $form_data = uc_signup_get_form($account);
+          uc_signup_create_placeholder_signup($nid, $account['uid'], $order->order_id, $account['mail'], $form_data);
         }
       }
+      //add session to order so we can create accounts later
+      $order->data['uc_signup'] = $_SESSION['uc_signup'];
+      // Store account data.
+      db_query("UPDATE {uc_orders} SET data = '%s' WHERE order_id = %d", serialize($order->data), $order->order_id);
+
     }
   }
 }
@@ -1084,23 +1068,50 @@ function uc_signup_order_prepare(&$order) {
  * Assemble form_state values with normal profile field keys from the data that
  * is stored in the session with email address prefixed keys.
  */
-function uc_signup_normalize_values(&$form_state, $mail, $profile_form) {
+function uc_signup_normalize_values(&$form_state, $mail, $profile_form, $profile_values = null) {
+  if (!$profile_values) {
+    $profile_values = $_SESSION['uc_signup']['profile'];
+  }
   foreach ($profile_form as $group => $fields) {
     foreach ($fields as $key => $value) {
-      $form_state['values'][$key] = $_SESSION['uc_signup']['profile'][$key .'_'. $mail];
+      $form_state['values'][$key] = $profile_values[$key .'_'. $mail];
     }
   }
 }
 
 /*
+ * quick and dirty way to grab user names
+ */
+function uc_signup_get_form($account) {
+  $form_data = array();
+  if ($account['uid'] == 0) {
+    $form_data = array(
+      'first_name' => $_SESSION['uc_signup']['profile']['profile_first_'. $account['mail']],
+      'last_name' => $_SESSION['uc_signup']['profile']['profile_last_'. $account['mail']],
+    );
+  }
+  else {
+    $user_account = user_load($account['uid']);
+    $form_data = array(
+      'first_name' => $user_account->profile_first,
+      'last_name' => $user_account->profile_last,
+    );    
+  }
+  return $form_data;
+}
+
+/*
  * Create a placeholder signup for a user.
  */
-function uc_signup_create_placeholder_signup($nid, $uid, $oid) {
-  $mail = 'placeholder-' . rand(111111, 99999) . '@example.com';
+function uc_signup_create_placeholder_signup($nid, $uid, $oid, $mail = null, $form_data = null) {
+  if (!$mail) {
+    $mail = 'placeholder-' . rand(111111, 99999) . '@example.com';
+  } 
   $signup_form = array(
     'uid' => 0,
     'signup_anon_mail' => $mail,
     'nid' => $nid,
+    'signup_form_data' => $form_data,  
   );
   $sid = signup_sign_up_user($signup_form, FALSE);
   if (is_numeric($sid)) {
@@ -1118,16 +1129,61 @@ function uc_signup_mark_paid($order, $settings = array()) {
       if (!isset($nodes[$signup->nid])) {
         $nodes[$signup->nid] = node_load($signup->nid);
       }
+     
+      //check for the case where the account was created between
+      // payment processing which happens in uc_cart for the main account
+      $mail = $signup->anon_mail;
+      $account = array();
+      if ($signup->uid == 0 && !($account = user_load(array('mail' => $mail)))) {
+        // We must provide a default password
+        // or the form will fail to validate.
+        
+        $random_password = user_password(8);    
+        $form_state['values']['mail'] = $mail;
+        $form_state['values']['name'] = uc_store_email_to_username($mail);
+        $form_state['values']['op'] = t('Create new account');
+        $form_state['values']['pass'] = $random_password;
+        $form_state['values']['notify'] = (bool)variable_get('uc_signup_account_notify', 1);
+        $form_state['values']['status'] = 1;
+           
+        $profile_form =  uc_signup_profile_form();
+        uc_signup_normalize_values($form_state, $mail, $profile_form, $order->data['uc_signup']['profile']);
+        // We masquerade as user 1 in case there is captcha or other protection on the user_register form that could cause submission to fail.
+        global $user;
+        $temp_user = $user;
+        // Always set this to false in case the operation fails.
+        session_save_session(FALSE);
+        $user = user_load(1);
+        // We use drupal_execute to enforce form validation on required
+        // fields. See http://drupal.org/node/547242 for an example of
+        // why this is necessary.
+        drupal_execute('uc_signup_profile_form', $form_state);
+        $user = $temp_user;
+        session_save_session(TRUE);
+        $account = $form_state['user'];
+        if (!$account->uid) {
+          uc_signup_cancel_temporary_signups($order);
+          return array(array('pass' => FALSE, 'message' => t('There was an error saving attendee contact information. Please verify that you have entered all required fields at the '. l('Attendee profile contact information form', 'uc_signup/attendees/profiles'))));
+        }    
+      } 
+      
+      //if we created or found the account update the signup uid
+      if ($account) {
+        $signup->uid = $account->uid;
+        $accounts[$signup->uid] = $account;        
+      }
+      
       // Assign the signup to the appropriate account.
-      $signup->anon_mail = ''; 
-      // The uid is added to $signup by _uc_signup_get_temporary_signups() but has not been saved to signup_log.
+      $signup->anon_mail = '';       
+      
+      // The uid is added to $signup by _uc_signup_get_temporary_signups() or above but has not been saved to signup_log.
       signup_save_signup($signup);
       // We haven't done a signup_load(), which populates $signup->mail, so we provide it here.
       if (empty($accounts[$signup->uid])) {
         $accounts[$signup->uid] = user_load($signup->uid);  
       }
       $signup->mail = $accounts[$signup->uid]->mail;
-      db_query("UPDATE {uc_signup_log} SET type = 1 WHERE sid = %d", $signup->sid);
+      db_query("UPDATE {uc_signup_log} SET type = 1, uid = %d WHERE sid = %d", $signup->uid, $signup->sid);
       if ($nodes[$signup->nid]->signup_send_confirmation) {
         signup_send_confirmation_mail($signup, $nodes[$signup->nid]);
       }
@@ -1160,7 +1216,7 @@ function uc_signup_mark_paid($order, $settings = array()) {
 function _uc_signup_node_available($node, $qty, &$message) {
   $type_name = db_result(db_query("SELECT name from {node_type} WHERE type = '%s'", $node->type));
   if (_signup_node_completed($node)) {
-    $message = t("We're sorry, but the @type %title has already passed.", array('@type' => $type_name, '%title' => $node->title));
+    $message = t(variable_get('uc_signup_signups_closed_text', "Signups are closed for this event."));
   }
   if (!$node->signup_status) {
     $message = t(variable_get('uc_signup_signups_closed_text', "Signups are closed for this event."));
