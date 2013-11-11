@@ -1204,13 +1204,13 @@ function uc_signup_mark_paid($order, $settings = array()) {
       unset($account);
       unset($signup);
     }
+    // Archive the finalized sids in the order in case they are deleted from the
+    // database.
+    $signups = uc_signup_confirmed_signups($order->order_id);
+    $message = theme('uc_signup_confirmed_signups_text', $signups, TRUE);
+    uc_order_comment_save($order->order_id, 0, $message); 
+    unset($_SESSION['uc_signup']);    
   }
-  // Archive the finalized sids in the order in case they are deleted from the
-  // database.
-  $signups = uc_signup_confirmed_signups($order->order_id);
-  $message = theme('uc_signup_confirmed_signups_text', $signups, TRUE);
-  uc_order_comment_save($order->order_id, 0, $message); 
-  unset($_SESSION['uc_signup']);
 }
 
 function _uc_signup_node_available($node, $qty, &$message) {
